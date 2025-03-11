@@ -119,7 +119,7 @@ async def retry_request(client: httpx.AsyncClient, url: str, method: str = "get"
     
     raise Exception(f"Failed after {max_retries} retries")
 
-async def fetch_commits(client: httpx.AsyncClient, owner: str, repo: str, branch: str):
+async def fetch_commits(client: httpx.AsyncClient, owner: str, repo: str, branch: str, query_counts: Dict[str, int]):
     """Fetch all commit SHAs, dates, authors, and default branch."""
     commits = {}
     after = None
@@ -130,6 +130,8 @@ async def fetch_commits(client: httpx.AsyncClient, owner: str, repo: str, branch
         f"https://api.github.com/repos/{owner}/{repo}",
         headers={"Authorization": f"Bearer {GITHUB_TOKEN}"}
     )
+    query_counts["REST API"] = query_counts.get("REST API", 0) + 1
+    
     repo_data = default_branch_response.json()
     default_branch = repo_data.get("default_branch", branch)  # Fallback to user-provided branch if not found
     
@@ -141,6 +143,8 @@ async def fetch_commits(client: httpx.AsyncClient, owner: str, repo: str, branch
         json={"query": BRANCH_COMMITS_QUERY, "variables": {"owner": owner, "repo": repo, "branch": default_branch, "after": after}},
         headers={"Authorization": f"Bearer {GITHUB_TOKEN}"},
     )
+    query_counts["GraphQL"] = query_counts.get("GraphQL", 0) + 1
+    
     initial_data = initial_response.json()
     
     total_count = 0
@@ -187,6 +191,8 @@ async def fetch_commits(client: httpx.AsyncClient, owner: str, repo: str, branch
                 json={"query": BRANCH_COMMITS_QUERY, "variables": {"owner": owner, "repo": repo, "branch": default_branch, "after": after}},
                 headers={"Authorization": f"Bearer {GITHUB_TOKEN}"},
             )
+            query_counts["GraphQL"] = query_counts.get("GraphQL", 0) + 1
+            
             data = response.json()
 
             # Check for errors in the GraphQL response
@@ -218,10 +224,11 @@ async def fetch_commits(client: httpx.AsyncClient, owner: str, repo: str, branch
 
     return commits, default_branch
 
-async def fetch_pr_commits(client: httpx.AsyncClient, owner: str, repo: str) -> Set[str]:
+async def fetch_pr_commits(client: httpx.AsyncClient, owner: str, repo: str, query_counts: Dict[str, int]) -> Set[str]:
     """Fetch all commit SHAs that have been merged through PRs."""
     pr_commits = set()
     after = None
+    pr_count = 0
     
     # Get initial response to get total count
     initial_response = await retry_request(
@@ -231,6 +238,8 @@ async def fetch_pr_commits(client: httpx.AsyncClient, owner: str, repo: str) -> 
         json={"query": PR_COMMITS_QUERY, "variables": {"owner": owner, "repo": repo, "after": after}},
         headers={"Authorization": f"Bearer {GITHUB_TOKEN}"},
     )
+    query_counts["GraphQL"] = query_counts.get("GraphQL", 0) + 1
+    
     initial_data = initial_response.json()
     
     total_count = 0
@@ -241,7 +250,7 @@ async def fetch_pr_commits(client: httpx.AsyncClient, owner: str, repo: str) -> 
         # Process the initial response
         if "errors" in initial_data:
             print(f"❌ Error fetching PR commits: {initial_data['errors']}")
-            return set()
+            return set(), 0
             
         pull_requests = initial_data.get("data", {}).get("repository", {}).get("pullRequests", {})
         edges = pull_requests.get("edges", [])
@@ -249,6 +258,7 @@ async def fetch_pr_commits(client: httpx.AsyncClient, owner: str, repo: str) -> 
 
         for pr in edges:
             pr_node = pr["node"]
+            pr_count += 1
             if pr_node["mergeCommit"]:
                 pr_commits.add(pr_node["mergeCommit"]["oid"])
             for commit in pr_node["commits"]["edges"]:
@@ -266,6 +276,8 @@ async def fetch_pr_commits(client: httpx.AsyncClient, owner: str, repo: str) -> 
                 json={"query": PR_COMMITS_QUERY, "variables": {"owner": owner, "repo": repo, "after": after}},
                 headers={"Authorization": f"Bearer {GITHUB_TOKEN}"},
             )
+            query_counts["GraphQL"] = query_counts.get("GraphQL", 0) + 1
+            
             data = response.json()
             
             # Check for errors in the GraphQL response
@@ -279,6 +291,7 @@ async def fetch_pr_commits(client: httpx.AsyncClient, owner: str, repo: str) -> 
 
             for pr in edges:
                 pr_node = pr["node"]
+                pr_count += 1
                 if pr_node["mergeCommit"]:
                     pr_commits.add(pr_node["mergeCommit"]["oid"])
                 for commit in pr_node["commits"]["edges"]:
@@ -287,27 +300,32 @@ async def fetch_pr_commits(client: httpx.AsyncClient, owner: str, repo: str) -> 
             after = page_info.get("endCursor")
             pbar.update(len(edges))
 
-    return pr_commits
+    return pr_commits, pr_count
 
 
 @app.command()
-def analyze_commits(owner: str, repo: str, branch: str = "main"):
+def analyze_commits(owner: str, repo: str, branch: str = "main", show_commits: bool = False):
     """Check which commits in the default branch were not merged via a PR."""
     async def main():
+        query_counts = {"GraphQL": 0, "REST API": 0}
+        
         async with httpx.AsyncClient() as client:
-            default_branch_commits, default_branch = await fetch_commits(client, owner, repo, branch)
-            prod_commits = await fetch_pr_commits(client, owner, repo)
+            default_branch_commits, default_branch = await fetch_commits(client, owner, repo, branch, query_counts)
+            pr_commits, pr_count = await fetch_pr_commits(client, owner, repo, query_counts)
 
-            not_via_pr = {sha: data for sha, data in default_branch_commits.items() if sha not in prod_commits}
+            not_via_pr = {sha: data for sha, data in default_branch_commits.items() if sha not in pr_commits}
 
-            print(f"\n🟢 Default Branch: {default_branch}")
+            # Print the repository information
+            print(f"\n📂 Repository: {owner}/{repo}")
+            print(f"🟢 Default Branch: {default_branch}")
             print(f"📌 Commits in {default_branch}: {len(default_branch_commits)}")
-            print(f"✅ Commits in merged PRs: {len(prod_commits)}")
+            print(f"🔄 Merged PRs: {pr_count}")
+            print(f"✅ Commits in merged PRs: {len(pr_commits)}")
             print(f"❌ Commits Not via PR: {len(not_via_pr)}")
             conformance_rate = 1 - (len(not_via_pr) / len(default_branch_commits)) if default_branch_commits else 1.0
             print(f"📊 Conformance Rate: {conformance_rate:.2%}")
 
-            if not_via_pr:
+            if not_via_pr and show_commits:
                 print("\n🛑 Commits Not via PR:")
                 table_data = [
                     [
@@ -319,9 +337,12 @@ def analyze_commits(owner: str, repo: str, branch: str = "main"):
                     for sha, data in not_via_pr.items()
                 ]
                 print(tabulate(table_data, headers=["Date", "Author", "Author Profile", "Commit Link"], tablefmt="fancy_grid"))
+            
+            print("\n📊 API Query Statistics:")
+            for endpoint, count in query_counts.items():
+                print(f"  {endpoint}: {count} queries")
 
     asyncio.run(main())
-
 
 if __name__ == "__main__":
     app()
