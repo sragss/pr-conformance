@@ -43,6 +43,12 @@ query GetCommits($owner: String!, $repo: String!, $branch: String!, $after: Stri
                     url
                   }
                 }
+                committer {
+                  user {
+                    login
+                    url
+                  }
+                }
               }
             }
           }
@@ -175,11 +181,15 @@ async def fetch_commits(client: httpx.AsyncClient, owner: str, repo: str, branch
             commit_node = edge["node"]
             author_login = commit_node["author"]["user"]["login"] if commit_node["author"] and commit_node["author"]["user"] else "Unknown"
             author_url = commit_node["author"]["user"]["url"] if commit_node["author"] and commit_node["author"]["user"] else "N/A"
+            committer_login = commit_node["committer"]["user"]["login"] if commit_node["committer"] and commit_node["committer"]["user"] else "Unknown"
+            committer_url = commit_node["committer"]["user"]["url"] if commit_node["committer"] and commit_node["committer"]["user"] else "N/A"
 
             commits[commit_node["oid"]] = {
                 "date": commit_node["committedDate"],
                 "author": author_login,
                 "author_url": author_url,
+                "committer": committer_login,
+                "committer_url": committer_url,
             }
 
         after = page_info.get("endCursor")
@@ -215,11 +225,15 @@ async def fetch_commits(client: httpx.AsyncClient, owner: str, repo: str, branch
                 commit_node = edge["node"]
                 author_login = commit_node["author"]["user"]["login"] if commit_node["author"] and commit_node["author"]["user"] else "Unknown"
                 author_url = commit_node["author"]["user"]["url"] if commit_node["author"] and commit_node["author"]["user"] else "N/A"
+                committer_login = commit_node["committer"]["user"]["login"] if commit_node["committer"] and commit_node["committer"]["user"] else "Unknown"
+                committer_url = commit_node["committer"]["user"]["url"] if commit_node["committer"] and commit_node["committer"]["user"] else "N/A"
 
                 commits[commit_node["oid"]] = {
                     "date": commit_node["committedDate"],
                     "author": author_login,
                     "author_url": author_url,
+                    "committer": committer_login,
+                    "committer_url": committer_url,
                 }
 
             after = page_info.get("endCursor")
@@ -333,28 +347,55 @@ def plot_conformance_over_time(default_branch_commits, pr_commits, owner, repo, 
     # Calculate conformance rate by month
     months = sorted(monthly_data.keys())
     conformance_rates = []
+    total_commits = []
     
     for month in months:
         total = monthly_data[month]["total"]
         pr = monthly_data[month]["pr"]
         rate = pr / total if total > 0 else 1.0
         conformance_rates.append(rate)
+        total_commits.append(total)
     
-    # Create the plot
-    plt.figure(figsize=(12, 6))
-    plt.plot(months, conformance_rates, marker='o', linestyle='-', color='blue')
-    plt.title(f"PR Conformance Rate Over Time for {owner}/{repo} ({default_branch})")
-    plt.xlabel("Month")
-    plt.ylabel("Conformance Rate")
-    plt.ylim(0, 1.1)  # Set y-axis from 0 to 1.1 to give some space above 100%
+    # Create the plot with two y-axes
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+    
+    # Primary y-axis for conformance rate
+    color = 'blue'
+    ax1.set_xlabel('Month')
+    ax1.set_ylabel('Conformance Rate', color=color)
+    ax1.plot(months, conformance_rates, marker='o', linestyle='-', color=color)
+    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.set_ylim(0, 1.1)  # Set y-axis from 0 to 1.1 to give some space above 100%
+    
+    # Add percentage labels on the primary y-axis
+    ax1.set_yticks([i/10 for i in range(0, 11)])
+    ax1.set_yticklabels([f"{i*10}%" for i in range(0, 11)])
+    
+    # Secondary y-axis for total commits
+    ax2 = ax1.twinx()
+    color = 'red'
+    ax2.set_ylabel('Total Commits', color=color)
+    ax2.bar(months, total_commits, alpha=0.3, color=color)
+    ax2.tick_params(axis='y', labelcolor=color)
+    
+    # Set title and adjust layout
+    plt.title(f"PR Conformance Rate and Commit Volume Over Time for {owner}/{repo} ({default_branch})")
     plt.grid(True, linestyle='--', alpha=0.7)
+    
+    # Show every fourth x-axis label
+    for i, label in enumerate(ax1.get_xticklabels()):
+        if i % 4 != 0:
+            label.set_visible(False)
     plt.xticks(rotation=45)
     
-    # Add percentage labels on the y-axis
-    plt.yticks([i/10 for i in range(0, 11)], [f"{i*10}%" for i in range(0, 11)])
+    # Add legend
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(['Conformance Rate'], loc='upper left')
+    ax2.legend(['Total Commits'], loc='upper right')
     
     # Tight layout to ensure everything fits
-    plt.tight_layout()
+    fig.tight_layout()
     
     # Save the plot
     filename = f"{owner}_{repo}_conformance_trend.png"
@@ -394,11 +435,13 @@ def analyze_commits(owner: str, repo: str, branch: str = "main", show_commits: b
                         data["date"],
                         data["author"],
                         data["author_url"],
+                        data["committer"],
+                        data["committer_url"],
                         f"https://github.com/{owner}/{repo}/commit/{sha}",
                     ]
                     for sha, data in not_via_pr.items()
                 ]
-                print(tabulate(table_data, headers=["Date", "Author", "Author Profile", "Commit Link"], tablefmt="fancy_grid"))
+                print(tabulate(table_data, headers=["Date", "Author", "Author Profile", "Committer", "Committer Profile", "Commit Link"], tablefmt="fancy_grid"))
             
             if show_trend:
                 plot_conformance_over_time(default_branch_commits, pr_commits, owner, repo, default_branch)

@@ -5,6 +5,7 @@ from tqdm.asyncio import tqdm
 from tabulate import tabulate
 from dotenv import load_dotenv
 import os
+from typing import List
 
 # Load .env
 load_dotenv()
@@ -95,7 +96,7 @@ async def fetch_pr_count(client: httpx.AsyncClient, owner: str, repo: str):
     
     total_count = initial_data.get("data", {}).get("repository", {}).get("pullRequests", {}).get("totalCount", 0)
     
-    with tqdm(desc="Counting PRs", unit="batch", total=total_count) as pbar:
+    with tqdm(desc=f"Counting PRs for {owner}/{repo}", unit="batch", total=total_count) as pbar:
         pull_requests = initial_data.get("data", {}).get("repository", {}).get("pullRequests", {})
         edges = pull_requests.get("edges", [])
         page_info = pull_requests.get("pageInfo", {})
@@ -131,20 +132,49 @@ async def fetch_pr_count(client: httpx.AsyncClient, owner: str, repo: str):
     
     return pr_count
 
+def parse_repo_string(repo_string: str):
+    """Parse a repository string in the format 'owner/repo'."""
+    parts = repo_string.strip().split('/')
+    if len(parts) != 2:
+        raise ValueError(f"Invalid repository format: {repo_string}. Expected format: owner/repo")
+    return parts[0], parts[1]
+
 @app.command()
-def count_prs(owner: str, repo: str):
-    """Count the total number of merged PRs for a repository."""
+def count_prs(
+    repos: List[str] = typer.Argument(..., help="Repository or repositories in the format 'owner/repo' or multiple 'owner/repo' entries")
+):
+    """Count the total number of merged PRs for one or more repositories."""
     async def main():
         async with httpx.AsyncClient() as client:
-            pr_count = await fetch_pr_count(client, owner, repo)
+            table_data = []
             
-            # Print the repository information
-            print(f"\n📂 Repository: {owner}/{repo}")
-            print(f"🔄 Total Merged PRs: {pr_count}")
+            # Clean up repository strings to handle comma-separated input
+            clean_repos = []
+            for repo_arg in repos:
+                # Split by comma and process each repository
+                for repo in repo_arg.split(','):
+                    repo = repo.strip()
+                    if repo:  # Skip empty strings
+                        clean_repos.append(repo)
             
-            # Display in a table format
-            table_data = [[owner, repo, pr_count]]
-            print("\n" + tabulate(table_data, headers=["Owner", "Repository", "Merged PRs"], tablefmt="fancy_grid"))
+            for repo_string in clean_repos:
+                try:
+                    owner, repo = parse_repo_string(repo_string)
+                    pr_count = await fetch_pr_count(client, owner, repo)
+                    
+                    # Print the repository information
+                    print(f"\n📂 Repository: {owner}/{repo}")
+                    print(f"🔄 Total Merged PRs: {pr_count}")
+                    
+                    table_data.append([owner, repo, pr_count])
+                except ValueError as e:
+                    print(f"\n❌ Error: {e}")
+            
+            # Display all repositories in a table format
+            if table_data:
+                print("\n" + tabulate(table_data, headers=["Owner", "Repository", "Merged PRs"], tablefmt="fancy_grid"))
+            else:
+                print("\n❌ No valid repositories were processed.")
     
     asyncio.run(main())
 
