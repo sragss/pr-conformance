@@ -7,6 +7,9 @@ from tabulate import tabulate
 from dotenv import load_dotenv
 import os
 import time
+import matplotlib.pyplot as plt
+from datetime import datetime
+from collections import defaultdict
 
 # Load .env
 load_dotenv()
@@ -302,9 +305,68 @@ async def fetch_pr_commits(client: httpx.AsyncClient, owner: str, repo: str, que
 
     return pr_commits, pr_count
 
+def plot_conformance_over_time(default_branch_commits, pr_commits, owner, repo, default_branch):
+    """Plot PR conformance over time."""
+    # Convert dates to datetime objects and sort commits by date
+    dated_commits = []
+    for sha, data in default_branch_commits.items():
+        date = datetime.fromisoformat(data["date"].replace("Z", "+00:00"))
+        is_pr = sha in pr_commits
+        dated_commits.append((date, is_pr))
+    
+    # Sort commits by date
+    dated_commits.sort()
+    
+    if not dated_commits:
+        print("⚠️ No commits to analyze for time trend.")
+        return
+    
+    # Group by month for a more readable chart
+    monthly_data = defaultdict(lambda: {"total": 0, "pr": 0})
+    
+    for date, is_pr in dated_commits:
+        month_key = date.strftime("%Y-%m")
+        monthly_data[month_key]["total"] += 1
+        if is_pr:
+            monthly_data[month_key]["pr"] += 1
+    
+    # Calculate conformance rate by month
+    months = sorted(monthly_data.keys())
+    conformance_rates = []
+    
+    for month in months:
+        total = monthly_data[month]["total"]
+        pr = monthly_data[month]["pr"]
+        rate = pr / total if total > 0 else 1.0
+        conformance_rates.append(rate)
+    
+    # Create the plot
+    plt.figure(figsize=(12, 6))
+    plt.plot(months, conformance_rates, marker='o', linestyle='-', color='blue')
+    plt.title(f"PR Conformance Rate Over Time for {owner}/{repo} ({default_branch})")
+    plt.xlabel("Month")
+    plt.ylabel("Conformance Rate")
+    plt.ylim(0, 1.1)  # Set y-axis from 0 to 1.1 to give some space above 100%
+    plt.grid(True, linestyle='--', alpha=0.7)
+    plt.xticks(rotation=45)
+    
+    # Add percentage labels on the y-axis
+    plt.yticks([i/10 for i in range(0, 11)], [f"{i*10}%" for i in range(0, 11)])
+    
+    # Tight layout to ensure everything fits
+    plt.tight_layout()
+    
+    # Save the plot
+    filename = f"{owner}_{repo}_conformance_trend.png"
+    plt.savefig(filename)
+    print(f"📈 Conformance trend chart saved as {filename}")
+    
+    # Show the plot
+    plt.show()
+
 
 @app.command()
-def analyze_commits(owner: str, repo: str, branch: str = "main", show_commits: bool = False):
+def analyze_commits(owner: str, repo: str, branch: str = "main", show_commits: bool = False, show_trend: bool = True):
     """Check which commits in the default branch were not merged via a PR."""
     async def main():
         query_counts = {"GraphQL": 0, "REST API": 0}
@@ -337,6 +399,9 @@ def analyze_commits(owner: str, repo: str, branch: str = "main", show_commits: b
                     for sha, data in not_via_pr.items()
                 ]
                 print(tabulate(table_data, headers=["Date", "Author", "Author Profile", "Commit Link"], tablefmt="fancy_grid"))
+            
+            if show_trend:
+                plot_conformance_over_time(default_branch_commits, pr_commits, owner, repo, default_branch)
             
             print("\n📊 API Query Statistics:")
             for endpoint, count in query_counts.items():
